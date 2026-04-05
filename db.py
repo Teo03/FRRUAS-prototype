@@ -1,5 +1,7 @@
 import datetime
 import psycopg2
+from psycopg2 import pool
+from contextlib import contextmanager
 
 DB_CONFIG = {
     "host": "localhost",
@@ -10,9 +12,62 @@ DB_CONFIG = {
     "options": "-c search_path=project,public",
 }
 
+# -- Connection Pool ----------------------------------------------------------
+# Reuses database connections instead of opening a new one per query.
+# SimpleConnectionPool maintains between minconn and maxconn connections.
 
+_pool = None
+
+
+def _get_pool():
+    global _pool
+    if _pool is None:
+        _pool = pool.SimpleConnectionPool(minconn=2, maxconn=10, **DB_CONFIG)
+    return _pool
+
+
+@contextmanager
 def get_connection():
-    return psycopg2.connect(**DB_CONFIG)
+    """Get a read-only connection from the pool.
+    Autocommit is enabled so SELECTs don't need explicit commit.
+    Connection is returned to the pool on exit."""
+    p = _get_pool()
+    conn = p.getconn()
+    try:
+        conn.autocommit = True
+        yield conn
+    finally:
+        conn.autocommit = False
+        p.putconn(conn)
+
+
+@contextmanager
+def get_transaction():
+    """Get a connection with explicit transaction management.
+    Commits on successful exit, rolls back on exception.
+    Connection is returned to the pool in both cases."""
+    p = _get_pool()
+    conn = p.getconn()
+    try:
+        conn.autocommit = False
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        p.putconn(conn)
+
+
+def close_pool():
+    """Close all connections in the pool."""
+    global _pool
+    if _pool is not None:
+        _pool.closeall()
+        _pool = None
+
+
+# -- UI Helpers ---------------------------------------------------------------
 
 
 def pick_from_list(prompt, items):

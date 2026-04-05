@@ -3,7 +3,7 @@ import getpass
 
 import bcrypt
 
-from db import get_connection, pick_from_list
+from db import get_connection, close_pool, pick_from_list
 from uc_browse import browse_resources
 from uc_reserve import make_reservation
 from uc_approve import approve_reservations
@@ -94,6 +94,8 @@ def main():
             main_menu(user_id, first_name, last_name, role)
     except KeyboardInterrupt:
         print("\n\n  Goodbye.")
+    finally:
+        close_pool()
 
 
 if __name__ == "__main__":

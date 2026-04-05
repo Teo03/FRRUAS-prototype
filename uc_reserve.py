@@ -1,6 +1,6 @@
 import datetime
 
-from db import get_connection, pick_from_list, print_table, input_date, input_time
+from db import get_connection, get_transaction, pick_from_list, print_table, input_date, input_time
 
 
 def make_reservation(user_id):
@@ -95,32 +95,45 @@ def make_reservation(user_id):
             print("  Reservation cancelled.")
             return
 
-        # Step 7: INSERT
-        conn = get_connection()
+        # Step 7: INSERT (transaction: re-check conflicts + insert atomically)
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO reservations
-                        (start_time, end_time, status, purpose, created_at, user_id, resource_id)
-                    VALUES (%s, %s, 'pending', %s, CURRENT_TIMESTAMP, %s, %s)
-                    RETURNING reservation_id, status, created_at
-                    """,
-                    (start_dt, end_dt, purpose, user_id, rid),
-                )
-                result = cur.fetchone()
-            conn.commit()
+            with get_transaction() as conn:
+                with conn.cursor() as cur:
+                    # Re-check conflicts inside the transaction to prevent
+                    # race conditions (another user inserting between our
+                    # check and insert)
+                    cur.execute(
+                        """
+                        SELECT COUNT(*) FROM reservations
+                        WHERE resource_id = %s
+                          AND status IN ('approved', 'pending')
+                          AND start_time < %s AND end_time > %s
+                        """,
+                        (rid, end_dt, start_dt),
+                    )
+                    if cur.fetchone()[0] > 0:
+                        raise RuntimeError("Conflict: another reservation was just created for this time slot")
+
+                    cur.execute(
+                        """
+                        INSERT INTO reservations
+                            (start_time, end_time, status, purpose, created_at, user_id, resource_id)
+                        VALUES (%s, %s, 'pending', %s, CURRENT_TIMESTAMP, %s, %s)
+                        RETURNING reservation_id, status, created_at
+                        """,
+                        (start_dt, end_dt, purpose, user_id, rid),
+                    )
+                    result = cur.fetchone()
+            # Transaction committed automatically
             print(f"\n  Reservation created successfully!")
             print(f"  Reservation ID: {result[0]}")
             print(f"  Status: {result[1]} (awaiting administrator approval)")
             print(f"  Created at: {result[2].strftime('%Y-%m-%d %H:%M')}")
             return
         except Exception as e:
-            conn.rollback()
+            # Transaction rolled back automatically
             print(f"\n  Error creating reservation: {e}")
             return
-        finally:
-            conn.close()
 
 
 def _fetch_all_resources():

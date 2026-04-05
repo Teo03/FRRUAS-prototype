@@ -1,4 +1,4 @@
-from db import get_connection, pick_from_list, print_table
+from db import get_connection, get_transaction, pick_from_list, print_table
 
 
 def approve_reservations(admin_user_id):
@@ -119,26 +119,41 @@ def _review_reservation(res, admin_user_id):
         return
 
     new_status = "approved" if action == 0 else "rejected"
-    conn = get_connection()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE reservations
-                SET status = %s, approved_by = %s
-                WHERE reservation_id = %s AND status = 'pending'
-                RETURNING reservation_id, status
-                """,
-                (new_status, admin_user_id, res["reservation_id"]),
-            )
-            result = cur.fetchone()
-        conn.commit()
+        with get_transaction() as conn:
+            with conn.cursor() as cur:
+                # For approvals, re-check conflicts within the transaction
+                # to prevent approving overlapping reservations
+                if new_status == "approved":
+                    cur.execute(
+                        """
+                        SELECT COUNT(*) FROM reservations
+                        WHERE resource_id = %s
+                          AND reservation_id != %s
+                          AND status = 'approved'
+                          AND start_time < %s AND end_time > %s
+                        """,
+                        (res["resource_id"], res["reservation_id"],
+                         res["end_time"], res["start_time"]),
+                    )
+                    if cur.fetchone()[0] > 0:
+                        raise RuntimeError("Conflict: another reservation was approved for this time slot")
+
+                cur.execute(
+                    """
+                    UPDATE reservations
+                    SET status = %s, approved_by = %s
+                    WHERE reservation_id = %s AND status = 'pending'
+                    RETURNING reservation_id, status
+                    """,
+                    (new_status, admin_user_id, res["reservation_id"]),
+                )
+                result = cur.fetchone()
+        # Transaction committed automatically
         if result:
             print(f"\n  Reservation #{result[0]} has been {result[1]}.")
         else:
             print("\n  Reservation was already processed by another administrator.")
     except Exception as e:
-        conn.rollback()
+        # Transaction rolled back automatically
         print(f"\n  Error: {e}")
-    finally:
-        conn.close()
